@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mistral-common>=1.10.0",
+    "openai>=2.30.0",
     "requests>=2.32.5",
     "ruff>=0.15.9",
     "transformers>=5.3.0",

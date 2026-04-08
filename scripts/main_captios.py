@@ -6,6 +6,7 @@ from pathlib import Path
 
 SENTENCE_END_RE = re.compile(r"[.!?][\"')\]]*$")
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Convert fragmented SRT subtitles into sentence-level JSON."
@@ -47,21 +48,25 @@ def build_sentences(events):
 
             stripped = current_text.strip()
             if stripped and SENTENCE_END_RE.search(stripped):
-                sentences.append({
-                    "text": stripped.replace('\n', ' '),
-                    "start": ms_to_timestamp(current_start),
-                    "end": ms_to_timestamp(current_end),
-                })
+                sentences.append(
+                    {
+                        "text": stripped.replace("\n", " "),
+                        "start": ms_to_timestamp(current_start),
+                        "end": ms_to_timestamp(current_end),
+                    }
+                )
                 current_text = ""
                 current_start = None
                 current_end = None
 
     if current_text.strip():
-        sentences.append({
-            "text": current_text.strip(),
-            "start": ms_to_timestamp(current_start),
-            "end": ms_to_timestamp(current_end),
-        })
+        sentences.append(
+            {
+                "text": current_text.strip(),
+                "start": ms_to_timestamp(current_start),
+                "end": ms_to_timestamp(current_end),
+            }
+        )
 
     return sentences
 
@@ -76,7 +81,7 @@ def main():
         raise SystemExit(f"File not found: {source}")
 
     with open(source) as f:
-        events = json.load(f)['events']
+        events = json.load(f)["events"]
 
     sentences = build_sentences(events)
     output_path = source.with_suffix(".json")
@@ -85,7 +90,6 @@ def main():
         json.dump(sentences, f, ensure_ascii=False, indent=2)
 
     print(f"Saved to {output_path}")
-
 
 
 if __name__ == "__main__":

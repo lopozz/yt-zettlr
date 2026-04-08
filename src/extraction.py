@@ -1,9 +1,14 @@
 import re
 import requests
 
+from openai import OpenAI
 from yt_dlp import YoutubeDL
 
-# todo use openai client
+client = OpenAI(
+    api_key="dummy-key",  # many local OpenAI-compatible servers accept any string here
+    base_url="http://0.0.0.0:8000/v1",
+)
+
 
 def extract_chapters_yt_dlp(url: str):
     ydl_opts = {
@@ -32,92 +37,19 @@ def extract_chapters_yt_dlp(url: str):
     return result
 
 
-def extract_chapter_titles(
-    prompt,
-    model="mistralai/Ministral-3-3B-Instruct-2512",
-    url="http://0.0.0.0:8000/v1/chat/completions",
-):
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-    }
-
-    headers = {"Content-Type": "application/json"}
-
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-
-    return response.json()["choices"][0]["message"]["content"]
-
-
-def extract_chapter_start_ids(
-    prompt,
-    model="mistralai/Ministral-3-3B-Instruct-2512",
-    url="http://0.0.0.0:8000/v1/chat/completions",
-):
-    payload = {
-        "model": model,
-        "temperature": 0.1,
-        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-    }
-
-    headers = {"Content-Type": "application/json"}
-
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-
-    return response.json()["choices"][0]["message"]["content"]
-
-
-def extract_ideas(
-    prompt,
-    model="mistralai/Ministral-3-3B-Instruct-2512",
-    url="http://0.0.0.0:8000/v1/chat/completions",
-):
-    payload = {
-        "model": model,
-        "temperature": 0.1,
-        "messages": [
+def openai_chat_completion_client(
+    prompt: str,
+    temperature: float = 0.1,
+    model: str = "mistralai/Ministral-3-3B-Instruct-2512",
+) -> str:
+    response = client.chat.completions.create(
+        model=model,
+        temperature=temperature,
+        messages=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    }
-                ],
+                "content": prompt,
             }
         ],
-    }
-
-    headers = {"Content-Type": "application/json"}
-
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-
-    return response.json()["choices"][0]["message"]["content"]
-
-
-def extract_idea_title(
-    prompt,
-    model="mistralai/Ministral-3-3B-Instruct-2512",
-    url="http://0.0.0.0:8000/v1/chat/completions",
-):
-    payload = {
-        "model": model,
-        "temperature": 0.1,
-        "messages": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            }
-        ],
-    }
-
-    headers = {"Content-Type": "application/json"}
-
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-
-    return response.json()["choices"][0]["message"]["content"]
+    )
+    return response.choices[0].message.content
