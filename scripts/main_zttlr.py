@@ -1,11 +1,20 @@
-import argparse
-import json
 import re
 import os
-from pathlib import Path
+import json
+import argparse
 import subprocess
 
+from pathlib import Path
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from src.extraction import openai_chat_completion_client
+from src.llm_engine_utils import check_health
 from src.prompts import (
     CHAPTER_ID_PROMPT,
     CHAPTER_TITLE_PROMPT,
@@ -13,23 +22,33 @@ from src.prompts import (
     IDEA_TITLE_PROMPT,
     IDEA_ID_PROMPT,
 )
-from main_captios import build_sentences
+from scripts.main_captios import build_sentences
 
 from src.zttlr import save_note_to_zettelkasten
 
 DEFAULT_MODEL = "mistralai/Ministral-3-3B-Instruct-2512"
-DEFAULT_URL = "http://0.0.0.0:8000/v1/chat/completions"
+DEFAULT_URL = "http://0.0.0.0:8000"
 TITLE_PATTERN = re.compile(r"^Chapter\s+\d+:\s*(.+)$", re.MULTILINE)
 START_ID_PATTERN = re.compile(r"^Chapter\s+\d+\s*[:]*\s*\[(\d+)\]\s*$", re.MULTILINE)
 NUMBERED_LIST_PATTERN = re.compile(r"^\s*\d+\.\s+(.*?)\s*$", re.MULTILINE)
 REFERENCE_PATTERN = re.compile(r"(\d+)(?:[-–—](\d+))?")
 
 
+def build_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build a chapter and idea structure from a transcript JSON file."
     )
-    parser.add_argument("yt_url", type=Path, help="URL of the youtube video.")
+    parser.add_argument("--yt-url", required=True, help="URL of the youtube video.")
     parser.add_argument(
         "-o",
         "--output",
@@ -54,10 +73,13 @@ def extract_titles(segments: list[dict], model: str) -> list[str]:
     prompt = CHAPTER_TITLE_PROMPT.format(
         context="\n".join(segment["text"] for segment in segments)
     )
-    content = openai_chat_completion_client(
-        prompt,
-        model=model,
-    )
+    with build_progress() as progress:
+        task_id = progress.add_task("Extracting chapter titles", total=1)
+        content = openai_chat_completion_client(
+            prompt,
+            model=model,
+        )
+        progress.advance(task_id)
     return TITLE_PATTERN.findall(content)
 
 
@@ -71,7 +93,10 @@ def extract_start_ids(segments: list[dict], titles: list[str], model: str) -> li
             f"Chapter {index}: {title}" for index, title in enumerate(titles, start=1)
         ),
     )
-    content = openai_chat_completion_client(prompt, model=model)
+    with build_progress() as progress:
+        task_id = progress.add_task("Extracting chapter boundaries", total=1)
+        content = openai_chat_completion_client(prompt, model=model)
+        progress.advance(task_id)
     return [int(start_id) for start_id in START_ID_PATTERN.findall(content)]
 
 
@@ -103,57 +128,98 @@ def build_chapters(
 def extract_chapter_ideas(chapters):
     chapter_ideas = []
     pattern = re.compile(r"^\s*\d+\.\s+(.*?)\s*$", re.MULTILINE)
-    for i, ch in enumerate(chapters):
-        print(f"Processing chapter {i + 1}/{len(chapters)} [{ch['title']}]")
-        context = " ".join(ch["segments"])
-        ideas = openai_chat_completion_client(
-            IDEA_PROMPT.format(title=ch["title"], context=context), 0
+    with build_progress() as progress:
+        chapter_task = progress.add_task(
+            "Extracting chapter ideas", total=len(chapters)
         )
-        ideas = pattern.findall(ideas)
-        structured_ideas = []
-        for idea in ideas:
-            response = (
-                openai_chat_completion_client(
-                    IDEA_TITLE_PROMPT.format(title=idea, context=context), 0
-                )
-                .replace("*", "")
-                .replace(".", "")
+        for ch in chapters:
+            context = " ".join(ch["segments"])
+            progress.update(
+                chapter_task,
+                description=f"Extracting ideas for {ch['title']}",
             )
-            structured_ideas.append({"title": response, "description": idea})
-        chapter_ideas.append(structured_ideas)
+            ideas = openai_chat_completion_client(
+                IDEA_PROMPT.format(title=ch["title"], context=context), 0
+            )
+            ideas = pattern.findall(ideas)
+            structured_ideas = []
+            idea_task = progress.add_task(
+                f"Refining idea titles for {ch['title']}",
+                total=max(len(ideas), 1),
+            )
+            for idea in ideas:
+                response = (
+                    openai_chat_completion_client(
+                        IDEA_TITLE_PROMPT.format(title=idea, context=context), 0
+                    )
+                    .replace("*", "")
+                    .replace(".", "")
+                )
+                structured_ideas.append({"title": response, "description": idea})
+                progress.advance(idea_task)
+
+            if not ideas:
+                progress.advance(idea_task)
+
+            progress.remove_task(idea_task)
+            chapter_ideas.append(structured_ideas)
+            progress.advance(chapter_task)
 
     return chapter_ideas
 
 
 def fetch_idea_references(chapter_ideas, chapters):
     chapter_references = []
-    for n, (ideas, ch) in enumerate(zip(chapter_ideas, chapters)):
-        print(f"Processing chapter {n + 1}/{len(chapters)} [{ch['title']}]")
-        references = []
-        offset = 0 if n == 0 else sum([len(ch["segments"]) for ch in chapters[: n - 1]])
-        context = "\n".join(
-            [f"[{i + offset}] {s}" for i, s in enumerate(ch["segments"])]
+    with build_progress() as progress:
+        chapter_task = progress.add_task(
+            "Fetching idea references", total=len(chapters)
         )
-        for idea in ideas:
-            content = openai_chat_completion_client(
-                IDEA_ID_PROMPT.format(context=context, concept=idea["description"]), 0
+        for n, (ideas, ch) in enumerate(zip(chapter_ideas, chapters)):
+            progress.update(
+                chapter_task,
+                description=f"Fetching references for {ch['title']}",
             )
-            segments = re.findall(r"(\d+)(?:[-–—](\d+))?", content)
+            references = []
+            offset = (
+                0 if n == 0 else sum(len(ch["segments"]) for ch in chapters[: n - 1])
+            )
+            context = "\n".join(
+                [f"[{i + offset}] {s}" for i, s in enumerate(ch["segments"])]
+            )
+            idea_task = progress.add_task(
+                f"Resolving references for {ch['title']}",
+                total=max(len(ideas), 1),
+            )
+            for idea in ideas:
+                content = openai_chat_completion_client(
+                    IDEA_ID_PROMPT.format(
+                        context=context,
+                        concept=idea["description"],
+                    ),
+                    0,
+                )
+                segments = re.findall(r"(\d+)(?:[-–—](\d+))?", content)
 
-            reference = []
+                reference = []
 
-            for start, end in segments:
-                if end:
-                    # 2. If there's an 'end' match, it's a range (e.g., 4-10)
-                    # We add 1 to the end because range() is exclusive
-                    reference.append(list(range(int(start), int(end) + 1)))
-                else:
-                    # 3. Otherwise, it's a single ID
-                    reference.append([int(start)])
+                for start, end in segments:
+                    if end:
+                        # 2. If there's an 'end' match, it's a range (e.g., 4-10)
+                        # We add 1 to the end because range() is exclusive
+                        reference.append(list(range(int(start), int(end) + 1)))
+                    else:
+                        # 3. Otherwise, it's a single ID
+                        reference.append([int(start)])
 
-            references.append(reference)
+                references.append(reference)
+                progress.advance(idea_task)
 
-        chapter_references.append(references)
+            if not ideas:
+                progress.advance(idea_task)
+
+            progress.remove_task(idea_task)
+            chapter_references.append(references)
+            progress.advance(chapter_task)
 
     return chapter_references
 
@@ -189,7 +255,13 @@ def add_ideas_to_chapters(transcript, chapter_ideas, chapter_references, chapter
 def main() -> None:
     args = parse_args()
 
-    output_dir = Path.cwd() / "subs"
+    if not check_health(DEFAULT_URL):
+        raise SystemExit(
+            f"LLM engine is not reachable at {DEFAULT_URL}. "
+            "Start the container before running this script."
+        )
+
+    output_dir = Path.cwd() / "z"
     output_dir.mkdir(exist_ok=True)
 
     command = [
@@ -208,8 +280,10 @@ def main() -> None:
     subprocess.run(command, check=True, capture_output=True, text=True)
 
     matches = list(output_dir.glob("*.json3"))
-    source = str(matches[0]) if matches else None
+    source = matches[0] if matches else None
 
+    if source is None:
+        raise SystemExit("No .json3 subtitle file was produced by yt-dlp.")
     if source.suffix.lower() != ".json3":
         raise SystemExit("Source must be an .json3 file.")
     if not source.exists():
@@ -227,7 +301,7 @@ def main() -> None:
     print(f"Saved to {output_path}")
 
     # Step 0: Load the transcript data that drives the whole pipeline.
-    transcript = load_transcript(args.input)
+    transcript = load_transcript(output_path)
 
     # Step 1: Extract the chapter boundaries from the transcript.
     titles = extract_titles(transcript, model=args.model)
@@ -248,8 +322,11 @@ def main() -> None:
     )
 
     c = 0
+    video_title = source.name.removesuffix(".en.json3")
     for i, ch in enumerate(chapters):
-        ch_dir = os.path.join(output_dir, f"{i}_{ch['title'].replace(' ', '_')}")
+        ch_dir = os.path.join(
+            output_dir, video_title, f"{i}_{ch['title'].replace(' ', '_')}"
+        )
         if not os.path.exists(ch_dir):
             os.makedirs(ch_dir)
         for idea in ch["ideas"]:

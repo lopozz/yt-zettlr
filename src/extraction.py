@@ -1,6 +1,3 @@
-import re
-import requests
-
 from openai import OpenAI
 from yt_dlp import YoutubeDL
 
