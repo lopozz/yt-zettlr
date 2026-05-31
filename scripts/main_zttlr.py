@@ -32,6 +32,7 @@ TITLE_PATTERN = re.compile(r"^Chapter\s+\d+:\s*(.+)$", re.MULTILINE)
 START_ID_PATTERN = re.compile(r"^Chapter\s+\d+\s*[:]*\s*\[(\d+)\]\s*$", re.MULTILINE)
 NUMBERED_LIST_PATTERN = re.compile(r"^\s*\d+\.\s+(.*?)\s*$", re.MULTILINE)
 REFERENCE_PATTERN = re.compile(r"(\d+)(?:[-–—](\d+))?")
+SHELL_ESCAPED_URL_CHARACTER_PATTERN = re.compile(r"\\([?=&])")
 
 
 def build_progress() -> Progress:
@@ -60,12 +61,65 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MODEL,
         help=f"Chat completion model to use. Default: {DEFAULT_MODEL}",
     )
+    parser.add_argument(
+        "--sub-lang",
+        default="en",
+        help="Subtitle language code to download, such as en or it. Default: en",
+    )
     return parser.parse_args()
 
 
 def load_transcript(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def video_title_from_subtitle_path(source: Path, subtitle_language: str) -> str:
+    language_suffix = f".{subtitle_language}.json3"
+    if source.name.endswith(language_suffix):
+        return source.name.removesuffix(language_suffix)
+    return source.name.removesuffix(".json3")
+
+
+def find_subtitle_source(output_dir: Path, subtitle_language: str) -> Path | None:
+    matches = list(output_dir.glob(f"*.{subtitle_language}.json3"))
+    if not matches:
+        matches = list(output_dir.glob("*.json3"))
+    return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
+
+
+def download_subtitles(
+    yt_url: str,
+    output_dir: Path,
+    subtitle_language: str = "en",
+) -> None:
+    yt_url = SHELL_ESCAPED_URL_CHARACTER_PATTERN.sub(r"\1", yt_url)
+    command = [
+        "yt-dlp",
+        "--skip-download",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-format",
+        "json3",
+        "--sub-langs",
+        subtitle_language,
+        "--restrict-filenames",
+        "-o",
+        str(output_dir / "%(title)s.%(ext)s"),
+    ]
+    command.append(yt_url)
+
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as error:
+        details = (error.stderr or error.stdout or "No details provided.").strip()
+        if "challenge solving failed" in details:
+            details += (
+                "\n\nYouTube requires a JavaScript challenge solver. Install Deno "
+                "2.3.0 or newer and run uv sync so yt-dlp's EJS scripts are "
+                "installed. Deno is detected automatically when it is on PATH."
+            )
+        raise SystemExit(f"yt-dlp failed to download subtitles:\n{details}") from error
 
 
 def extract_titles(segments: list[dict], model: str) -> list[str]:
@@ -98,6 +152,27 @@ def extract_start_ids(segments: list[dict], titles: list[str], model: str) -> li
         content = openai_chat_completion_client(prompt, model=model)
         progress.advance(task_id)
     return [int(start_id) for start_id in START_ID_PATTERN.findall(content)]
+
+
+def normalize_start_ids(
+    start_ids: list[int], titles: list[str], segment_count: int
+) -> list[int]:
+    if len(start_ids) != len(titles):
+        raise ValueError(
+            f"Chapter/title mismatch: {len(start_ids)} != {len(titles)}"
+        )
+
+    invalid_ids = [start_id for start_id in start_ids if not 0 <= start_id < segment_count]
+    if invalid_ids:
+        raise ValueError(
+            f"Chapter start ids are outside the transcript: {invalid_ids}"
+        )
+
+    normalized_ids = sorted(start_ids)
+    if len(set(normalized_ids)) != len(normalized_ids):
+        raise ValueError(f"Chapter start ids are not unique: {start_ids}")
+
+    return normalized_ids
 
 
 def build_chapters(
@@ -174,15 +249,13 @@ def fetch_idea_references(chapter_ideas, chapters):
         chapter_task = progress.add_task(
             "Fetching idea references", total=len(chapters)
         )
-        for n, (ideas, ch) in enumerate(zip(chapter_ideas, chapters)):
+        for ideas, ch in zip(chapter_ideas, chapters):
             progress.update(
                 chapter_task,
                 description=f"Fetching references for {ch['title']}",
             )
             references = []
-            offset = (
-                0 if n == 0 else sum(len(ch["segments"]) for ch in chapters[: n - 1])
-            )
+            offset = ch["start"]
             context = "\n".join(
                 [f"[{i + offset}] {s}" for i, s in enumerate(ch["segments"])]
             )
@@ -264,23 +337,13 @@ def main() -> None:
     output_dir = Path.cwd() / "z"
     output_dir.mkdir(exist_ok=True)
 
-    command = [
-        "yt-dlp",
-        "--skip-download",
-        "--write-subs",
-        "--write-auto-subs",
-        "--sub-format",
-        "json3",
-        "--restrict-filenames",
-        "-o",
-        str(output_dir / "%(title)s.%(ext)s"),
+    download_subtitles(
         args.yt_url,
-    ]
+        output_dir,
+        subtitle_language=args.sub_lang,
+    )
 
-    subprocess.run(command, check=True, capture_output=True, text=True)
-
-    matches = list(output_dir.glob("*.json3"))
-    source = matches[0] if matches else None
+    source = find_subtitle_source(output_dir, args.sub_lang)
 
     if source is None:
         raise SystemExit("No .json3 subtitle file was produced by yt-dlp.")
@@ -307,12 +370,10 @@ def main() -> None:
     titles = extract_titles(transcript, model=args.model)
     start_ids = extract_start_ids(transcript, titles, model=args.model)
 
-    assert all(
-        [int(start_ids[i]) < int(start_ids[i + 1]) for i in range(len(start_ids) - 1)]
-    ), f"Chapter start ids are not strictly increasing: {start_ids}"
-    assert len(start_ids) == len(start_ids), (
-        f"Chapter/title mismatch: {len(start_ids)} != {len(titles)}"
-    )
+    try:
+        start_ids = normalize_start_ids(start_ids, titles, len(transcript))
+    except ValueError as error:
+        raise SystemExit(f"Invalid chapter boundaries returned by the model: {error}")
 
     chapters = build_chapters(transcript, titles, start_ids)
     chapter_ideas = extract_chapter_ideas(chapters)
@@ -322,13 +383,13 @@ def main() -> None:
     )
 
     c = 0
-    video_title = source.name.removesuffix(".en.json3")
+    video_title = video_title_from_subtitle_path(source, args.sub_lang)
     for i, ch in enumerate(chapters):
-        ch_dir = os.path.join(
-            output_dir, video_title, f"{i}_{ch['title'].replace(' ', '_')}"
+        chapter_dir_name = (
+            f"{i}_{ch['title'].replace(' ', '_').replace('/', '_and_')}"
         )
-        if not os.path.exists(ch_dir):
-            os.makedirs(ch_dir)
+        ch_dir = os.path.join(output_dir, video_title, chapter_dir_name)
+        os.makedirs(ch_dir, exist_ok=True)
         for idea in ch["ideas"]:
             save_note_to_zettelkasten("purpose", c, idea, args.yt_url, ch_dir)
             c += 1
