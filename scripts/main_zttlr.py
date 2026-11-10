@@ -18,7 +18,7 @@ from openai import OpenAI
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from src.llm_engine_utils import check_health
+from src.utils import check_health
 from src.prompts import (
     CHAPTER_ID_PROMPT,
     CHAPTER_TITLE_PROMPT,
