@@ -1,8 +1,6 @@
 # Queen
 
-Queen turns the subtitles of a YouTube video into a small Zettelkasten-style
-knowledge base. It is intended for extracting durable notes from talks,
-lectures, and long-form videos without manually reviewing the full transcript.
+Queen turns the subtitles of a YouTube video into a small Zettelkasten-style knowledge base. It is intended for extracting durable notes from talks, lectures, and long-form videos without manually reviewing the full transcript.
 
 The pipeline:
 
@@ -133,5 +131,5 @@ uv run python -m scripts.main_captios \
 
 - The main pipeline prefers the most recently modified `.json3` subtitle file
   matching `--sub-lang`.
-- The LLM endpoint is currently fixed to `http://0.0.0.0:8000`.
+- The LLM endpoint defaults to `http://0.0.0.0:8000`; override it with `--host` and `--port`.
 - Notes are written to the repository-local `z/` directory.

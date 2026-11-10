@@ -8,7 +8,6 @@ Split the context into ordered chapters.
 
 Rules:
 - Output only the chapters.
-- Start each line with a dash (-)
 - One line per chapter.
 - Use short title descriptions.
 - Do not add markdown.
@@ -26,15 +25,18 @@ CHAPTER_ID_PROMPT = """Task:
 Find the start_id for each chapter.
 
 Rules:
+- There are exactly {chapter_count} chapters listed below. You must output
+  exactly {chapter_count} lines, one per chapter, no more and no fewer.
 - You must return exactly one existing start_id for each chapter.
 - The start_id must be the first segment where a chapter begins.
 - Chapters are ordered
 - Do not modify the number of chapters
+- Do not stop before covering every chapter listed below.
 - Do not add explanation.
 - Do not add any extra text.
 - Do not add markdown.
 - Use the exact format below.
-- Every line follwo this format "Chapter X: [start_id]"
+- Every line follows this format "Chapter X: [start_id]"
 
 <context>
 {context}
@@ -43,6 +45,7 @@ Rules:
 Chapters:
 {chapters}
 """
+
 IDEA_PROMPT = """Task:
 Identify a concise numbered list of relevant ideas with important facts in the chapter.
 Only the things to remember.
