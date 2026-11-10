@@ -3,6 +3,7 @@ import os
 import json
 import argparse
 
+from bisect import bisect_left
 from pathlib import Path
 from rich.progress import (
     BarColumn,
@@ -102,41 +103,11 @@ def is_native_caption_track(formats: list[dict]) -> bool:
     )
 
 
-def check_subtitle_language_available(yt_url: str, subtitle_language: str) -> None:
-    with YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
-        info = ydl.extract_info(yt_url, download=False)
-
-    manual = info.get("subtitles") or {}
-    automatic = info.get("automatic_captions") or {}
-
-    if subtitle_language in manual or (
-        subtitle_language in automatic
-        and is_native_caption_track(automatic[subtitle_language])
-    ):
-        return
-
-    native_languages = sorted(
-        set(manual)
-        | {lang for lang, formats in automatic.items() if is_native_caption_track(formats)}
-    )
-    suggestion = (
-        f"Rerun with --sub-lang {native_languages[0]}"
-        if native_languages
-        else "No native captions of any language are available for this video."
-    )
-    raise SystemExit(
-        f"No native '{subtitle_language}' captions are available for this video "
-        f"(requesting a translated language triggers YouTube's rate-limited "
-        f"translation endpoint). Available native languages: "
-        f"{', '.join(native_languages) or 'none'}. {suggestion}"
-    )
-
-
 def download_subtitles(
     yt_url: str,
     output_dir: Path,
     subtitle_language: str = "en",
-) -> Path:
+) -> dict:
     yt_url = SHELL_ESCAPED_URL_CHARACTER_PATTERN.sub(r"\1", yt_url)
     options = {
         "quiet": True,
@@ -151,7 +122,40 @@ def download_subtitles(
 
     try:
         with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(yt_url, download=True)
+            # One extraction per run: fetch the metadata unprocessed, validate the
+            # language from it, then download from the same info.
+            info = ydl.extract_info(yt_url, download=False, process=False)
+
+            manual = info.get("subtitles") or {}
+            automatic = info.get("automatic_captions") or {}
+            if not (
+                subtitle_language in manual
+                or (
+                    subtitle_language in automatic
+                    and is_native_caption_track(automatic[subtitle_language])
+                )
+            ):
+                native_languages = sorted(
+                    set(manual)
+                    | {
+                        lang
+                        for lang, formats in automatic.items()
+                        if is_native_caption_track(formats)
+                    }
+                )
+                suggestion = (
+                    f"Rerun with --sub-lang {native_languages[0]}"
+                    if native_languages
+                    else "No native captions of any language are available for this video."
+                )
+                raise SystemExit(
+                    f"No native '{subtitle_language}' captions are available for this "
+                    f"video (requesting a translated language triggers YouTube's "
+                    f"rate-limited translation endpoint). Available native languages: "
+                    f"{', '.join(native_languages) or 'none'}. {suggestion}"
+                )
+
+            info = ydl.process_ie_result(info, download=True)
     except DownloadError as error:
         details = str(error).strip() or "No details provided."
         if "challenge solving failed" in details:
@@ -165,7 +169,7 @@ def download_subtitles(
     subtitle = (info.get("requested_subtitles") or {}).get(subtitle_language)
     if not subtitle or not subtitle.get("filepath"):
         raise SystemExit("No .json3 subtitle file was produced by yt-dlp.")
-    return Path(subtitle["filepath"])
+    return info
 
 
 def openai_chat_completion(
@@ -395,7 +399,7 @@ def main() -> None:
     args = parse_args()
 
     base_url = f"http://{args.host}:{args.port}"
-    check_health(base_url, args.model)
+    # check_health(base_url, args.model)
     
     client = OpenAI(
         api_key="dummy-key",  # many local OpenAI-compatible servers accept any string here
@@ -405,13 +409,12 @@ def main() -> None:
     output_dir = Path.cwd() / "z"
     output_dir.mkdir(exist_ok=True)
 
-    check_subtitle_language_available(args.yt_url, args.sub_lang)
-
-    source = download_subtitles(
+    info = download_subtitles(
         args.yt_url,
         output_dir,
         subtitle_language=args.sub_lang,
     )
+    source = Path(info["requested_subtitles"][args.sub_lang]["filepath"])
 
     with open(source) as f:
         events = json.load(f)["events"]
@@ -428,11 +431,24 @@ def main() -> None:
     with output_path.open(encoding="utf-8") as f:
         transcript = json.load(f)
 
-    # Step 1: Extract the chapter boundaries from the transcript.
-    titles = extract_titles(client, transcript, model=args.model)
+    # Step 1: Use the chapters defined on YouTube, or ask the model for them.
+    native_chapters = info.get("chapters") or []
+    if len(native_chapters) >= 2:
+        sentence_starts = [
+            sum(float(part) * 60**i for i, part in enumerate(reversed(s["start"].split(":"))))
+            for s in transcript
+        ]
+        titles = [chapter["title"].strip() for chapter in native_chapters]
+        start_ids = [
+            bisect_left(sentence_starts, chapter["start_time"])
+            for chapter in native_chapters
+        ]
+    else:
+        titles = extract_titles(client, transcript, model=args.model)
+        start_ids = extract_start_ids(client, transcript, titles, model=args.model)
 
+    print(titles)
 
-    # start_ids = extract_start_ids(client, transcript, titles, model=args.model)
 
     # try:
     #     start_ids = normalize_start_ids(start_ids, titles, len(transcript))

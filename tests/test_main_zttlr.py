@@ -58,13 +58,17 @@ class FetchIdeaReferencesTest(unittest.TestCase):
         self.assertIn("[2] third\n[3] fourth", second_prompt)
 
 
-def fake_youtube_dl(info=None, error=None):
+def fake_youtube_dl(info=None, error=None, raw=None):
     ydl = MagicMock()
     ydl.__enter__.return_value = ydl
+    ydl.extract_info.return_value = raw if raw is not None else {
+        "automatic_captions": {"en": [{"url": "https://yt/api/timedtext?v=1"}]},
+        "subtitles": {},
+    }
     if error:
-        ydl.extract_info.side_effect = error
+        ydl.process_ie_result.side_effect = error
     else:
-        ydl.extract_info.return_value = info
+        ydl.process_ie_result.return_value = info
     return ydl
 
 
@@ -89,7 +93,10 @@ class DownloadSubtitlesTest(unittest.TestCase):
 
     @patch("scripts.main_zttlr.YoutubeDL")
     def test_passes_subtitle_language_to_yt_dlp(self, youtube_dl):
-        youtube_dl.return_value = fake_youtube_dl(info_with_subtitle("it"))
+        youtube_dl.return_value = fake_youtube_dl(
+            info_with_subtitle("it"),
+            raw={"subtitles": {"it": [{"url": "https://yt/api/timedtext?v=1"}]}},
+        )
 
         download_subtitles(
             "https://www.youtube.com/watch?v=TTIwVQQGG3Y",
@@ -101,16 +108,17 @@ class DownloadSubtitlesTest(unittest.TestCase):
         self.assertEqual(options["subtitleslangs"], ["it"])
 
     @patch("scripts.main_zttlr.YoutubeDL")
-    def test_returns_path_reported_by_yt_dlp(self, youtube_dl):
+    def test_returns_info_reported_by_yt_dlp(self, youtube_dl):
+        info = info_with_subtitle("it", "/tmp/subtitles/Video.it.json3")
         youtube_dl.return_value = fake_youtube_dl(
-            info_with_subtitle("it", "/tmp/subtitles/Video.it.json3")
+            info, raw={"subtitles": {"it": [{"url": "https://yt/api/timedtext?v=1"}]}}
         )
 
-        source = download_subtitles(
+        result = download_subtitles(
             "https://example.com/video", Path("/tmp/subtitles"), "it"
         )
 
-        self.assertEqual(source, Path("/tmp/subtitles/Video.it.json3"))
+        self.assertEqual(result, info)
 
     @patch("scripts.main_zttlr.YoutubeDL")
     def test_fails_when_no_subtitle_was_written(self, youtube_dl):
@@ -139,6 +147,34 @@ class DownloadSubtitlesTest(unittest.TestCase):
 
         with self.assertRaisesRegex(SystemExit, "Install Deno 2.3.0 or newer"):
             download_subtitles("https://example.com/video", Path("/tmp/subtitles"))
+
+    @patch("scripts.main_zttlr.YoutubeDL")
+    def test_extracts_metadata_only_once(self, youtube_dl):
+        ydl = youtube_dl.return_value = fake_youtube_dl(info_with_subtitle())
+
+        download_subtitles("https://example.com/video", Path("/tmp/subtitles"))
+
+        ydl.extract_info.assert_called_once()
+        ydl.process_ie_result.assert_called_once()
+
+    @patch("scripts.main_zttlr.YoutubeDL")
+    def test_rejects_translated_only_language_before_downloading(self, youtube_dl):
+        ydl = youtube_dl.return_value = fake_youtube_dl(
+            raw={
+                "subtitles": {},
+                "automatic_captions": {
+                    "it": [{"url": "https://yt/api/timedtext?v=1&tlang=it"}],
+                    "en": [{"url": "https://yt/api/timedtext?v=1"}],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(SystemExit, "Rerun with --sub-lang en"):
+            download_subtitles(
+                "https://example.com/video", Path("/tmp/subtitles"), "it"
+            )
+
+        ydl.process_ie_result.assert_not_called()
 
 
 if __name__ == "__main__":

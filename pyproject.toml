@@ -12,7 +12,7 @@ dependencies = [
     "ruff>=0.15.9",
     "secretstorage>=3.5.0",
     "transformers>=5.3.0",
-    "yt-dlp[default]>=2026.7.4",
+    "yt-dlp[curl-cffi,default]>=2026.7.4",
 ]
 
 [project.scripts]
