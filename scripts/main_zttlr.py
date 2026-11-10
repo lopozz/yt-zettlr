@@ -1,6 +1,7 @@
 import re
 import os
 import json
+import logging
 import argparse
 
 from bisect import bisect_left
@@ -30,6 +31,8 @@ from src.prompts import (
 from scripts.main_captios import build_sentences
 
 from src.zttlr import save_note_to_zettelkasten
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "mistralai/Ministral-3-3B-Instruct-2512"
 DEFAULT_HOST = "0.0.0.0"
@@ -83,7 +86,17 @@ def parse_args() -> argparse.Namespace:
         default="en",
         help="Subtitle language code to download, such as en or it. Default: en",
     )
-    return parser.parse_args()    
+    parser.add_argument(
+        "--chapters",
+        action="store_true",
+        help="Generate chapters with the LLM even if the video has YouTube chapters.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Log debug details, such as the extracted chapters.",
+    )
+    return parser.parse_args()
 
 
 def video_title_from_subtitle_path(source: Path, subtitle_language: str) -> str:
@@ -117,6 +130,7 @@ def download_subtitles(
         "subtitlesformat": "json3",
         "subtitleslangs": [subtitle_language],
         "restrictfilenames": True,
+        "overwrites": False,
         "outtmpl": str(output_dir / "%(title)s.%(ext)s"),
     }
 
@@ -183,7 +197,7 @@ def openai_chat_completion(
     return response.choices[0].message.content
 
 
-def extract_titles(client: OpenAI, segments: list[dict], model: str) -> list[str]:
+def extract_titles(client: OpenAI, segments: list[dict], model: str) -> list[str]: 
     # Step 1: Ask the model to split the transcript into chapter titles.
     prompt = CHAPTER_TITLE_PROMPT.format(
         context="\n".join(segment["text"] for segment in segments)
@@ -192,7 +206,6 @@ def extract_titles(client: OpenAI, segments: list[dict], model: str) -> list[str
         task_id = progress.add_task("Extracting chapter titles", total=1)
         content = openai_chat_completion(client, model, prompt)
         progress.advance(task_id)
-        print(content)
     return TITLE_PATTERN.findall(content)
 
 
@@ -397,6 +410,10 @@ def add_ideas_to_chapters(transcript, chapter_ideas, chapter_references, chapter
 
 def main() -> None:
     args = parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(levelname)s %(message)s",
+    )
 
     base_url = f"http://{args.host}:{args.port}"
     # check_health(base_url, args.model)
@@ -433,7 +450,7 @@ def main() -> None:
 
     # Step 1: Use the chapters defined on YouTube, or ask the model for them.
     native_chapters = info.get("chapters") or []
-    if len(native_chapters) >= 2:
+    if len(native_chapters) >= 2 and not args.llm_chapters:
         sentence_starts = [
             sum(float(part) * 60**i for i, part in enumerate(reversed(s["start"].split(":"))))
             for s in transcript
@@ -447,7 +464,8 @@ def main() -> None:
         titles = extract_titles(client, transcript, model=args.model)
         start_ids = extract_start_ids(client, transcript, titles, model=args.model)
 
-    print(titles)
+    for number, (title, start_id) in enumerate(zip(titles, start_ids), start=1):
+        logger.debug("  %d. %s (sentence %s)", number, title, start_id)
 
 
     # try:

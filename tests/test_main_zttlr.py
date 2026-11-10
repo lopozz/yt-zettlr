@@ -149,6 +149,14 @@ class DownloadSubtitlesTest(unittest.TestCase):
             download_subtitles("https://example.com/video", Path("/tmp/subtitles"))
 
     @patch("scripts.main_zttlr.YoutubeDL")
+    def test_reuses_existing_subtitle_files(self, youtube_dl):
+        youtube_dl.return_value = fake_youtube_dl(info_with_subtitle())
+
+        download_subtitles("https://example.com/video", Path("/tmp/subtitles"))
+
+        self.assertIs(youtube_dl.call_args.args[0]["overwrites"], False)
+
+    @patch("scripts.main_zttlr.YoutubeDL")
     def test_extracts_metadata_only_once(self, youtube_dl):
         ydl = youtube_dl.return_value = fake_youtube_dl(info_with_subtitle())
 
